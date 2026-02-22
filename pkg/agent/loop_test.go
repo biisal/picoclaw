@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -630,4 +631,185 @@ func TestAgentLoop_ContextExhaustionRetry(t *testing.T) {
 	if len(finalHistory) >= 8 {
 		t.Errorf("Expected history to be compressed (len < 8), got %d", len(finalHistory))
 	}
+}
+
+func TestChunkString(t *testing.T) {
+	t.Run("returns nil for invalid size or empty input", func(t *testing.T) {
+		if got := chunkString("", 10); got != nil {
+			t.Fatalf("expected nil for empty input, got %v", got)
+		}
+		if got := chunkString("abc", 0); got != nil {
+			t.Fatalf("expected nil for size=0, got %v", got)
+		}
+		if got := chunkString("abc", -1); got != nil {
+			t.Fatalf("expected nil for size<0, got %v", got)
+		}
+	})
+
+	t.Run("chunks by rune count and preserves utf8 validity", func(t *testing.T) {
+		in := "ab😀cd界x"
+		got := chunkString(in, 3)
+		want := []string{"ab😀", "cd界", "x"}
+		if len(got) != len(want) {
+			t.Fatalf("chunk count mismatch: got %d want %d (%v)", len(got), len(want), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("chunk[%d] mismatch: got %q want %q", i, got[i], want[i])
+			}
+			if !utf8.ValidString(got[i]) {
+				t.Fatalf("chunk[%d] is not valid utf8: %q", i, got[i])
+			}
+		}
+	})
+}
+
+func TestTargetReasoningChannelID_AllChannels(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+		Channels: config.ChannelsConfig{
+			WhatsApp: config.WhatsAppConfig{ReasoningChannelID: "rid-whatsapp"},
+			Telegram: config.TelegramConfig{ReasoningChannelID: "rid-telegram"},
+			Feishu:   config.FeishuConfig{ReasoningChannelID: "rid-feishu"},
+			Discord:  config.DiscordConfig{ReasoningChannelID: "rid-discord"},
+			MaixCam:  config.MaixCamConfig{ReasoningChannelID: "rid-maixcam"},
+			QQ:       config.QQConfig{ReasoningChannelID: "rid-qq"},
+			DingTalk: config.DingTalkConfig{ReasoningChannelID: "rid-dingtalk"},
+			Slack:    config.SlackConfig{ReasoningChannelID: "rid-slack"},
+			LINE:     config.LINEConfig{ReasoningChannelID: "rid-line"},
+			OneBot:   config.OneBotConfig{ReasoningChannelID: "rid-onebot"},
+			WeCom:    config.WeComConfig{ReasoningChannelID: "rid-wecom"},
+			WeComApp: config.WeComAppConfig{ReasoningChannelID: "rid-wecom-app"},
+		},
+	}
+
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	tests := []struct {
+		channel string
+		wantID  string
+	}{
+		{channel: "whatsapp", wantID: "rid-whatsapp"},
+		{channel: "telegram", wantID: "rid-telegram"},
+		{channel: "feishu", wantID: "rid-feishu"},
+		{channel: "discord", wantID: "rid-discord"},
+		{channel: "maixcam", wantID: "rid-maixcam"},
+		{channel: "qq", wantID: "rid-qq"},
+		{channel: "dingtalk", wantID: "rid-dingtalk"},
+		{channel: "slack", wantID: "rid-slack"},
+		{channel: "line", wantID: "rid-line"},
+		{channel: "onebot", wantID: "rid-onebot"},
+		{channel: "wecom", wantID: "rid-wecom"},
+		{channel: "wecom_app", wantID: "rid-wecom-app"},
+		{channel: "unknown", wantID: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.channel, func(t *testing.T) {
+			got := al.targetReasoningChannelID(tt.channel)
+			if got != tt.wantID {
+				t.Fatalf("targetReasoningChannelID(%q) = %q, want %q", tt.channel, got, tt.wantID)
+			}
+		})
+	}
+}
+
+func TestHandleReasoning(t *testing.T) {
+	newLoop := func(t *testing.T) (*AgentLoop, *bus.MessageBus) {
+		t.Helper()
+		tmpDir, err := os.MkdirTemp("", "agent-test-*")
+		if err != nil {
+			t.Fatalf("Failed to create temp dir: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+		cfg := &config.Config{
+			Agents: config.AgentsConfig{
+				Defaults: config.AgentDefaults{
+					Workspace:         tmpDir,
+					Model:             "test-model",
+					MaxTokens:         4096,
+					MaxToolIterations: 10,
+				},
+			},
+		}
+		msgBus := bus.NewMessageBus()
+		return NewAgentLoop(cfg, msgBus, &mockProvider{}), msgBus
+	}
+
+	t.Run("skips when any required field is empty", func(t *testing.T) {
+		al, msgBus := newLoop(t)
+		al.handleReasoning("reasoning", "telegram", "")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		if msg, ok := msgBus.SubscribeOutbound(ctx); ok {
+			t.Fatalf("expected no outbound message, got %+v", msg)
+		}
+	})
+
+	t.Run("publishes one message for non telegram", func(t *testing.T) {
+		al, msgBus := newLoop(t)
+		al.handleReasoning("hello reasoning", "slack", "channel-1")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		msg, ok := msgBus.SubscribeOutbound(ctx)
+		if !ok {
+			t.Fatal("expected an outbound message")
+		}
+		if msg.Channel != "slack" || msg.ChatID != "channel-1" || msg.Content != "hello reasoning" {
+			t.Fatalf("unexpected outbound message: %+v", msg)
+		}
+	})
+
+	t.Run("chunks telegram messages", func(t *testing.T) {
+		al, msgBus := newLoop(t)
+		large := make([]rune, telegramMaxMessageLength+5)
+		for i := range large {
+			large[i] = '界'
+		}
+		largeReasoning := string(large)
+		al.handleReasoning(largeReasoning, "telegram", "tg-chat")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		msg1, ok := msgBus.SubscribeOutbound(ctx)
+		if !ok {
+			t.Fatal("expected first outbound message")
+		}
+		msg2, ok := msgBus.SubscribeOutbound(ctx)
+		if !ok {
+			t.Fatal("expected second outbound message")
+		}
+
+		if msg1.Channel != "telegram" || msg2.Channel != "telegram" {
+			t.Fatalf("expected telegram channel messages, got %+v and %+v", msg1, msg2)
+		}
+		if msg1.ChatID != "tg-chat" || msg2.ChatID != "tg-chat" {
+			t.Fatalf("expected chatID tg-chat, got %+v and %+v", msg1, msg2)
+		}
+
+		gotCombined := msg1.Content + msg2.Content
+		if gotCombined != largeReasoning {
+			t.Fatalf("chunked content mismatch: got len=%d want len=%d", len(gotCombined), len(largeReasoning))
+		}
+		if len([]rune(msg1.Content)) != telegramMaxMessageLength {
+			t.Fatalf("first chunk rune length = %d, want %d", len([]rune(msg1.Content)), telegramMaxMessageLength)
+		}
+		if len([]rune(msg2.Content)) != 5 {
+			t.Fatalf("second chunk rune length = %d, want 5", len([]rune(msg2.Content)))
+		}
+	})
 }

@@ -148,6 +148,13 @@ func parseResponse(body []byte) (*LLMResponse, error) {
 	var apiResponse struct {
 		Choices []struct {
 			Message struct {
+				Reasoning        string `json:"reasoning"`
+				ReasoningDetails []struct {
+					Format string `json:"format"`
+					Index  int    `json:"index"`
+					Type   string `json:"type"`
+					Text   string `json:"text"`
+				} `json:"reasoning_details"`
 				Content   string `json:"content"`
 				ToolCalls []struct {
 					ID       string `json:"id"`
@@ -221,6 +228,8 @@ func parseResponse(body []byte) (*LLMResponse, error) {
 	}
 
 	return &LLMResponse{
+		Reasoning:    choice.Message.Reasoning,
+		ReasoningDetails: choice.Message.ReasoningDetails,
 		Content:      choice.Message.Content,
 		ToolCalls:    toolCalls,
 		FinishReason: choice.FinishReason,

@@ -25,12 +25,18 @@ type FunctionCall struct {
 }
 
 type LLMResponse struct {
-	Content      string     `json:"content"`
-	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
-	FinishReason string     `json:"finish_reason"`
-	Usage        *UsageInfo `json:"usage,omitempty"`
+	Content          string     `json:"content"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	FinishReason     string     `json:"finish_reason"`
+	Usage            *UsageInfo `json:"usage,omitempty"`
+	Reasoning        string     `json:"reasoning"`
+	ReasoningDetails []struct {
+		Format string `json:"format"`
+		Index  int    `json:"index"`
+		Type   string `json:"type"`
+		Text   string `json:"text"`
+	} `json:"reasoning_details"`
 }
-
 type UsageInfo struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`

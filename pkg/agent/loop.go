@@ -79,6 +79,25 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	}
 }
 
+const telegramMaxMessageLength = 4096
+
+
+func chunkString(s string, size int) []string {
+	if size <= 0 || s == "" {
+		return nil
+	}
+
+	runes := []rune(s)
+	chunks := make([]string, 0, (len(runes)+size-1)/size)
+
+	for i := 0; i < len(runes); i += size {
+		end := min(i + size, len(runes))
+		chunks = append(chunks, string(runes[i:end]))
+	}
+
+	return chunks
+}
+
 // registerSharedTools registers tools that are shared across all agents (web, message, spawn).
 func registerSharedTools(
 	cfg *config.Config,
@@ -466,6 +485,58 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 	return finalContent, nil
 }
 
+func (al *AgentLoop) targetReasoningChannelID(channelName string) (chatID string) {
+	var channels = al.cfg.Channels
+
+	switch channelName {
+	case "telegram":
+		return channels.Telegram.ReasoningChannelID
+	case "whatsapp":
+		return channels.WhatsApp.ReasoningChannelID
+	case "feishu":
+		return channels.Feishu.ReasoningChannelID
+	case "discord":
+		return channels.Discord.ReasoningChannelID
+	case "maixcam":
+		return channels.MaixCam.ReasoningChannelID
+	case "qq":
+		return channels.QQ.ReasoningChannelID
+	case "dingtalk":
+		return channels.DingTalk.ReasoningChannelID
+	case "slack":
+		return channels.Slack.ReasoningChannelID
+	case "line":
+		return channels.LINE.ReasoningChannelID
+	case "onebot":
+		return channels.OneBot.ReasoningChannelID
+	case "wecom":
+		return channels.WeCom.ReasoningChannelID
+	case "wecom_app":
+		return channels.WeComApp.ReasoningChannelID
+	}
+	return
+}
+
+
+func (al *AgentLoop) handleReasoning(reasoningContent, channelName, channelID string) {
+	if reasoningContent == "" || channelName == "" || channelID == "" {
+		return
+	}
+
+	messages := []string{reasoningContent}
+	if channelName == "telegram" {
+		messages = chunkString(reasoningContent, telegramMaxMessageLength)
+	}
+
+	for _, message := range messages {
+		al.bus.PublishOutbound(bus.OutboundMessage{
+			Channel: channelName,
+			ChatID:  channelID,
+			Content: message,
+		})
+	}
+}
+
 // runLLMIteration executes the LLM call loop with tool handling.
 func (al *AgentLoop) runLLMIteration(
 	ctx context.Context,
@@ -521,6 +592,7 @@ func (al *AgentLoop) runLLMIteration(
 						return agent.Provider.Chat(ctx, messages, providerToolDefs, model, map[string]any{
 							"max_tokens":  agent.MaxTokens,
 							"temperature": agent.Temperature,
+							"think":       true,
 						})
 					},
 				)
@@ -589,6 +661,17 @@ func (al *AgentLoop) runLLMIteration(
 				})
 			return "", iteration, fmt.Errorf("LLM call failed after retries: %w", err)
 		}
+		
+		go al.handleReasoning(response.Reasoning, opts.Channel , al.targetReasoningChannelID(opts.Channel))
+		// Log LLM response details
+		logger.InfoCF("agent", "LLM response",
+			map[string]any{
+				"agent_id":      agent.ID,
+				"iteration":     iteration,
+				"content_chars": len(response.Content),
+				"tool_calls":    len(response.ToolCalls),
+				"reasoning":     response.Reasoning,
+			})
 
 		// Check if no tool calls - we're done
 		if len(response.ToolCalls) == 0 {
