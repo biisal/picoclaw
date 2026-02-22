@@ -592,7 +592,6 @@ func (al *AgentLoop) runLLMIteration(
 						return agent.Provider.Chat(ctx, messages, providerToolDefs, model, map[string]any{
 							"max_tokens":  agent.MaxTokens,
 							"temperature": agent.Temperature,
-							"think":       true,
 						})
 					},
 				)
