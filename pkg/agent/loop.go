@@ -79,25 +79,6 @@ func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers
 	}
 }
 
-const telegramMaxMessageLength = 4096
-
-
-func chunkString(s string, size int) []string {
-	if size <= 0 || s == "" {
-		return nil
-	}
-
-	runes := []rune(s)
-	chunks := make([]string, 0, (len(runes)+size-1)/size)
-
-	for i := 0; i < len(runes); i += size {
-		end := min(i + size, len(runes))
-		chunks = append(chunks, string(runes[i:end]))
-	}
-
-	return chunks
-}
-
 // registerSharedTools registers tools that are shared across all agents (web, message, spawn).
 func registerSharedTools(
 	cfg *config.Config,
@@ -486,7 +467,7 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 }
 
 func (al *AgentLoop) targetReasoningChannelID(channelName string) (chatID string) {
-	var channels = al.cfg.Channels
+	channels := al.cfg.Channels
 
 	switch channelName {
 	case "telegram":
@@ -517,24 +498,16 @@ func (al *AgentLoop) targetReasoningChannelID(channelName string) (chatID string
 	return
 }
 
-
 func (al *AgentLoop) handleReasoning(reasoningContent, channelName, channelID string) {
 	if reasoningContent == "" || channelName == "" || channelID == "" {
 		return
 	}
 
-	messages := []string{reasoningContent}
-	if channelName == "telegram" {
-		messages = chunkString(reasoningContent, telegramMaxMessageLength)
-	}
-
-	for _, message := range messages {
-		al.bus.PublishOutbound(bus.OutboundMessage{
-			Channel: channelName,
-			ChatID:  channelID,
-			Content: message,
-		})
-	}
+	al.bus.PublishOutbound(bus.OutboundMessage{
+		Channel: channelName,
+		ChatID:  channelID,
+		Content: reasoningContent,
+	})
 }
 
 // runLLMIteration executes the LLM call loop with tool handling.
@@ -660,8 +633,8 @@ func (al *AgentLoop) runLLMIteration(
 				})
 			return "", iteration, fmt.Errorf("LLM call failed after retries: %w", err)
 		}
-		
-		go al.handleReasoning(response.Reasoning, opts.Channel , al.targetReasoningChannelID(opts.Channel))
+
+		go al.handleReasoning(response.Reasoning, opts.Channel, al.targetReasoningChannelID(opts.Channel))
 		// Log LLM response details
 		logger.InfoCF("agent", "LLM response",
 			map[string]any{

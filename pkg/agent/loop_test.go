@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -633,37 +632,6 @@ func TestAgentLoop_ContextExhaustionRetry(t *testing.T) {
 	}
 }
 
-func TestChunkString(t *testing.T) {
-	t.Run("returns nil for invalid size or empty input", func(t *testing.T) {
-		if got := chunkString("", 10); got != nil {
-			t.Fatalf("expected nil for empty input, got %v", got)
-		}
-		if got := chunkString("abc", 0); got != nil {
-			t.Fatalf("expected nil for size=0, got %v", got)
-		}
-		if got := chunkString("abc", -1); got != nil {
-			t.Fatalf("expected nil for size<0, got %v", got)
-		}
-	})
-
-	t.Run("chunks by rune count and preserves utf8 validity", func(t *testing.T) {
-		in := "ab😀cd界x"
-		got := chunkString(in, 3)
-		want := []string{"ab😀", "cd界", "x"}
-		if len(got) != len(want) {
-			t.Fatalf("chunk count mismatch: got %d want %d (%v)", len(got), len(want), got)
-		}
-		for i := range want {
-			if got[i] != want[i] {
-				t.Fatalf("chunk[%d] mismatch: got %q want %q", i, got[i], want[i])
-			}
-			if !utf8.ValidString(got[i]) {
-				t.Fatalf("chunk[%d] is not valid utf8: %q", i, got[i])
-			}
-		}
-	})
-}
-
 func TestTargetReasoningChannelID_AllChannels(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-test-*")
 	if err != nil {
@@ -774,42 +742,26 @@ func TestHandleReasoning(t *testing.T) {
 		}
 	})
 
-	t.Run("chunks telegram messages", func(t *testing.T) {
+	t.Run("publishes one message for telegram", func(t *testing.T) {
 		al, msgBus := newLoop(t)
-		large := make([]rune, telegramMaxMessageLength+5)
-		for i := range large {
-			large[i] = '界'
-		}
-		largeReasoning := string(large)
-		al.handleReasoning(largeReasoning, "telegram", "tg-chat")
+		reasoning := "hello telegram reasoning"
+		al.handleReasoning(reasoning, "telegram", "tg-chat")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
-		msg1, ok := msgBus.SubscribeOutbound(ctx)
+		msg, ok := msgBus.SubscribeOutbound(ctx)
 		if !ok {
-			t.Fatal("expected first outbound message")
-		}
-		msg2, ok := msgBus.SubscribeOutbound(ctx)
-		if !ok {
-			t.Fatal("expected second outbound message")
+			t.Fatal("expected outbound message")
 		}
 
-		if msg1.Channel != "telegram" || msg2.Channel != "telegram" {
-			t.Fatalf("expected telegram channel messages, got %+v and %+v", msg1, msg2)
+		if msg.Channel != "telegram" {
+			t.Fatalf("expected telegram channel message, got %+v", msg)
 		}
-		if msg1.ChatID != "tg-chat" || msg2.ChatID != "tg-chat" {
-			t.Fatalf("expected chatID tg-chat, got %+v and %+v", msg1, msg2)
+		if msg.ChatID != "tg-chat" {
+			t.Fatalf("expected chatID tg-chat, got %+v", msg)
 		}
-
-		gotCombined := msg1.Content + msg2.Content
-		if gotCombined != largeReasoning {
-			t.Fatalf("chunked content mismatch: got len=%d want len=%d", len(gotCombined), len(largeReasoning))
-		}
-		if len([]rune(msg1.Content)) != telegramMaxMessageLength {
-			t.Fatalf("first chunk rune length = %d, want %d", len([]rune(msg1.Content)), telegramMaxMessageLength)
-		}
-		if len([]rune(msg2.Content)) != 5 {
-			t.Fatalf("second chunk rune length = %d, want 5", len([]rune(msg2.Content)))
+		if msg.Content != reasoning {
+			t.Fatalf("content mismatch: got %q want %q", msg.Content, reasoning)
 		}
 	})
 }
