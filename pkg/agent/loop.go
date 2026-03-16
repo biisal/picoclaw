@@ -49,6 +49,7 @@ type AgentLoop struct {
 	cmdRegistry    *commands.Registry
 	mcp            mcpRuntime
 	steering       *steeringQueue
+	subTurnResults sync.Map
 	mu             sync.RWMutex
 	// Track active requests for safe provider cleanup
 	activeRequests sync.WaitGroup
@@ -85,9 +86,6 @@ func NewAgentLoop(
 ) *AgentLoop {
 	registry := NewAgentRegistry(cfg, provider)
 
-	// Register shared tools to all agents
-	registerSharedTools(cfg, msgBus, registry, provider)
-
 	// Set up shared fallback chain
 	cooldown := providers.NewCooldownTracker()
 	fallbackChain := providers.NewFallbackChain(cooldown)
@@ -110,11 +108,15 @@ func NewAgentLoop(
 		steering:    newSteeringQueue(parseSteeringMode(cfg.Agents.Defaults.SteeringMode)),
 	}
 
+	// Register shared tools to all agents (now that al is created)
+	registerSharedTools(al, cfg, msgBus, registry, provider)
+
 	return al
 }
 
 // registerSharedTools registers tools that are shared across all agents (web, message, spawn).
 func registerSharedTools(
+	al *AgentLoop,
 	cfg *config.Config,
 	msgBus *bus.MessageBus,
 	registry *AgentRegistry,
@@ -230,12 +232,76 @@ func registerSharedTools(
 			if cfg.Tools.IsToolEnabled("subagent") {
 				subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace)
 				subagentManager.SetLLMOptions(agent.MaxTokens, agent.Temperature)
+				
+				// Set the spawner that links into AgentLoop's turnState
+				subagentManager.SetSpawner(func(
+					ctx context.Context,
+					task, label, targetAgentID string,
+					tls *tools.ToolRegistry,
+					maxTokens int,
+					temperature float64,
+					hasMaxTokens, hasTemperature bool,
+				) (*tools.ToolResult, error) {
+					// 1. Recover parent Turn State from Context
+					parentTS := turnStateFromContext(ctx)
+					if parentTS == nil {
+						// Fallback: If no turnState exists in context, create an isolated ad-hoc root turn state
+						// so that the tool can still function outside of an agent loop (e.g. tests, raw invocations).
+						parentTS = &turnState{
+							ctx:            ctx,
+							turnID:         "adhoc-root",
+							depth:          0,
+							session:        newEphemeralSession(nil),
+							pendingResults: make(chan *tools.ToolResult, 16),
+						}
+					}
+					
+					// 2. Build Tools slice from registry
+					var tlSlice []tools.Tool
+					for _, name := range tls.List() {
+						if t, ok := tls.Get(name); ok {
+							tlSlice = append(tlSlice, t)
+						}
+					}
+
+					// 3. System Prompt
+					systemPrompt := "You are a subagent. Complete the given task independently and report the result.\n" +
+						"You have access to tools - use them as needed to complete your task.\n" +
+						"After completing the task, provide a clear summary of what was done.\n\n" +
+						"Task: " + task
+
+					// 4. Resolve Model
+					modelToUse := agent.Model
+					if targetAgentID != "" {
+						if targetAgent, ok := al.GetRegistry().GetAgent(targetAgentID); ok {
+							modelToUse = targetAgent.Model
+						}
+					}
+
+					// 5. Build SubTurnConfig
+					cfg := SubTurnConfig{
+						Model:        modelToUse,
+						Tools:        tlSlice,
+						SystemPrompt: systemPrompt,
+					}
+					if hasMaxTokens {
+						cfg.MaxTokens = maxTokens
+					}
+
+					// 6. Spawn SubTurn
+					return spawnSubTurn(ctx, al, parentTS, cfg)
+				})
+
 				spawnTool := tools.NewSpawnTool(subagentManager)
 				currentAgentID := agentID
 				spawnTool.SetAllowlistChecker(func(targetAgentID string) bool {
 					return registry.CanSpawnSubagent(currentAgentID, targetAgentID)
 				})
 				agent.Tools.Register(spawnTool)
+				
+				// Also register the synchronous subagent tool
+				subagentTool := tools.NewSubagentTool(subagentManager)
+				agent.Tools.Register(subagentTool)
 			} else {
 				logger.WarnCF("agent", "spawn tool requires subagent to be enabled", nil)
 			}
@@ -450,7 +516,7 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	}
 
 	// Ensure shared tools are re-registered on the new registry
-	registerSharedTools(cfg, al.bus, registry, provider)
+	registerSharedTools(al, cfg, al.bus, registry, provider)
 
 	// Atomically swap the config and registry under write lock
 	// This ensures readers see a consistent pair
@@ -896,6 +962,20 @@ func (al *AgentLoop) runAgentLoop(
 	agent *AgentInstance,
 	opts processOptions,
 ) (string, error) {
+	// Initialize a root TurnState for this iteration, allowing sub-turns to be spawned.
+	rootTS := &turnState{
+		ctx:            ctx,
+		turnID:         opts.SessionKey, // Associate this turn graph with the current session key
+		depth:          0,
+		session:        agent.Sessions,
+		pendingResults: make(chan *tools.ToolResult, 16),
+	}
+	ctx = withTurnState(ctx, rootTS)
+
+	// Ensure the parent's pending results channel is cleaned up when this root turn finishes
+	defer al.unregisterSubTurnResultChannel(rootTS.turnID)
+	al.registerSubTurnResultChannel(rootTS.turnID, rootTS.pendingResults)
+
 	// 0. Record last channel for heartbeat notifications (skip internal channels and cli)
 	if opts.Channel != "" && opts.ChatID != "" {
 		if !constants.IsInternalChannel(opts.Channel) {
@@ -939,6 +1019,9 @@ func (al *AgentLoop) runAgentLoop(
 	if err != nil {
 		return "", err
 	}
+
+	// Signal completion to rootTS so it knows it is finished, terminating any active sub-turns
+	rootTS.Finish()
 
 	// If last tool had ForUser content and we already sent it, we might not need to send final response
 	// This is controlled by the tool's Silent flag and ForUser content
@@ -1052,6 +1135,14 @@ func (al *AgentLoop) runLLMIteration(
 	if !opts.SkipInitialSteeringPoll {
 		if msgs := al.dequeueSteeringMessages(); len(msgs) > 0 {
 			pendingMessages = msgs
+		}
+	}
+
+	// Poll for any pending SubTurn results and inject them as assistant context.
+	if subResults := al.dequeuePendingSubTurnResults(opts.SessionKey); len(subResults) > 0 {
+		for _, r := range subResults {
+			msg := providers.Message{Role: "user", Content: fmt.Sprintf("[SubTurn Result] %s", r.ForLLM)}
+			pendingMessages = append(pendingMessages, msg)
 		}
 	}
 
@@ -1458,6 +1549,15 @@ func (al *AgentLoop) runLLMIteration(
 				}
 				steeringAfterTools = steerMsgs
 				break
+			}
+
+			// Also poll for any SubTurn results that arrived during tool execution.
+			if subResults := al.dequeuePendingSubTurnResults(opts.SessionKey); len(subResults) > 0 {
+				for _, r := range subResults {
+					msg := providers.Message{Role: "user", Content: fmt.Sprintf("[SubTurn Result] %s", r.ForLLM)}
+					messages = append(messages, msg)
+					agent.Sessions.AddFullMessage(opts.SessionKey, msg)
+				}
 			}
 		}
 

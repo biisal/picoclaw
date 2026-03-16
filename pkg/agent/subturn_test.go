@@ -253,3 +253,73 @@ func TestSpawnSubTurn_OrphanResultRouting(t *testing.T) {
 		t.Error("Parent history was polluted by orphan result")
 	}
 }
+
+// ====================== Extra Independent Test: Result Channel Registration ======================
+func TestSubTurnResultChannelRegistration(t *testing.T) {
+	al, _, _, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+
+	parent := &turnState{
+		ctx:            context.Background(),
+		turnID:         "parent-reg-1",
+		depth:          0,
+		pendingResults: make(chan *tools.ToolResult, 4),
+		session:        &ephemeralSessionStore{},
+	}
+
+	cfg := SubTurnConfig{Model: "gpt-4o-mini", Tools: []tools.Tool{}}
+
+	// Before spawn: channel should not be registered
+	if results := al.dequeuePendingSubTurnResults(parent.turnID); results != nil {
+		t.Error("expected no channel before spawnSubTurn")
+	}
+
+	_, _ = spawnSubTurn(context.Background(), al, parent, cfg)
+
+	// After spawn completes: channel should be unregistered (defer cleanup in spawnSubTurn)
+	if _, ok := al.subTurnResults.Load(parent.turnID); ok {
+		t.Error("channel should be unregistered after spawnSubTurn completes")
+	}
+}
+
+// ====================== Extra Independent Test: Dequeue Pending SubTurn Results ======================
+func TestDequeuePendingSubTurnResults(t *testing.T) {
+	al, _, _, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+
+	sessionKey := "test-session-dequeue"
+	ch := make(chan *tools.ToolResult, 4)
+
+	// Register channel manually
+	al.registerSubTurnResultChannel(sessionKey, ch)
+	defer al.unregisterSubTurnResultChannel(sessionKey)
+
+	// Empty channel returns nil
+	if results := al.dequeuePendingSubTurnResults(sessionKey); len(results) != 0 {
+		t.Errorf("expected empty results, got %d", len(results))
+	}
+
+	// Put 3 results in
+	ch <- &tools.ToolResult{ForLLM: "result-1"}
+	ch <- &tools.ToolResult{ForLLM: "result-2"}
+	ch <- &tools.ToolResult{ForLLM: "result-3"}
+
+	results := al.dequeuePendingSubTurnResults(sessionKey)
+	if len(results) != 3 {
+		t.Errorf("expected 3 results, got %d", len(results))
+	}
+	if results[0].ForLLM != "result-1" || results[2].ForLLM != "result-3" {
+		t.Error("results order or content mismatch")
+	}
+
+	// Channel should be drained now
+	if results := al.dequeuePendingSubTurnResults(sessionKey); len(results) != 0 {
+		t.Errorf("expected empty after drain, got %d", len(results))
+	}
+
+	// Unregistered session returns nil
+	al.unregisterSubTurnResultChannel(sessionKey)
+	if results := al.dequeuePendingSubTurnResults(sessionKey); results != nil {
+		t.Error("expected nil for unregistered session")
+	}
+}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // SteeringMode controls how queued steering messages are dequeued.
@@ -185,4 +186,44 @@ func (al *AgentLoop) Continue(ctx context.Context, sessionKey, channel, chatID s
 		SendResponse:            false,
 		SkipInitialSteeringPoll: true,
 	})
+}
+
+// ====================== SubTurn Result Polling ======================
+
+// dequeuePendingSubTurnResults polls the SubTurn result channel for the given
+// session and returns all available results without blocking.
+// Returns nil if no channel is registered for this session.
+func (al *AgentLoop) dequeuePendingSubTurnResults(sessionKey string) []*tools.ToolResult {
+	chInterface, ok := al.subTurnResults.Load(sessionKey)
+	if !ok {
+		return nil
+	}
+
+	ch, ok := chInterface.(chan *tools.ToolResult)
+	if !ok {
+		return nil
+	}
+
+	var results []*tools.ToolResult
+	for {
+		select {
+		case result := <-ch:
+			if result != nil {
+				results = append(results, result)
+			}
+		default:
+			return results
+		}
+	}
+}
+
+// registerSubTurnResultChannel registers a SubTurn result channel for the given session.
+// This allows the parent loop to poll for results from child SubTurns.
+func (al *AgentLoop) registerSubTurnResultChannel(sessionKey string, ch chan *tools.ToolResult) {
+	al.subTurnResults.Store(sessionKey, ch)
+}
+
+// unregisterSubTurnResultChannel removes the SubTurn result channel for the given session.
+func (al *AgentLoop) unregisterSubTurnResultChannel(sessionKey string) {
+	al.subTurnResults.Delete(sessionKey)
 }
