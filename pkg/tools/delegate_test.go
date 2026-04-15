@@ -272,6 +272,26 @@ func TestDelegateTool_Execute_SelfDelegation(t *testing.T) {
 	}
 }
 
+func TestDelegateTool_Execute_SelfDelegation_Normalized(t *testing.T) {
+	tool := NewDelegateTool()
+	tool.SetSpawner(&delegateMockSpawner{})
+	tool.SetSelfAgentID("alpha") // stored normalized
+
+	// Case-insensitive and whitespace variants should still be caught
+	variants := []string{"ALPHA", " Alpha ", "  alpha  "}
+	for _, v := range variants {
+		t.Run(v, func(t *testing.T) {
+			result := tool.Execute(context.Background(), map[string]any{
+				"agent_id": v,
+				"task":     "test",
+			})
+			if !result.IsError {
+				t.Errorf("agent_id=%q should be caught as self-delegation", v)
+			}
+		})
+	}
+}
+
 // nilResultSpawner always returns (nil, nil).
 type nilResultSpawner struct{}
 
