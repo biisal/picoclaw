@@ -143,7 +143,7 @@ func TestFormatArgsJSON_EscapeHTMLByDefault(t *testing.T) {
 
 func TestFormatArgsJSON_NilArgs(t *testing.T) {
 	got := FormatArgsJSON(nil, false, false)
-	want := `null`
+	want := `{}`
 	if got != want {
 		t.Fatalf("FormatArgsJSON() nil = %q, want %q", got, want)
 	}

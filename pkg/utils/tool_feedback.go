@@ -10,6 +10,11 @@ import (
 const ToolFeedbackContinuationHint = "Continuing the current task."
 
 func FormatArgsJSON(args map[string]any, prettyPrint, disableEscapeHTML bool) string {
+	// Normalize nil to empty map for consistent output
+	if args == nil {
+		args = map[string]any{}
+	}
+
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	if prettyPrint {
@@ -19,7 +24,8 @@ func FormatArgsJSON(args map[string]any, prettyPrint, disableEscapeHTML bool) st
 		enc.SetEscapeHTML(false)
 	}
 	if err := enc.Encode(args); err != nil {
-		return "{}"
+		// Fallback to fmt.Sprintf to preserve visibility of problematic args
+		return fmt.Sprintf("%v", args)
 	}
 	return strings.TrimSpace(buf.String())
 }
