@@ -4,7 +4,6 @@ package hardwaretools
 
 import (
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -126,9 +125,8 @@ func serialWrite(cfg serialConfig, data []byte, timeout time.Duration) (int, err
 }
 
 func openAndConfigureWindowsSerial(cfg serialConfig, timeout time.Duration) (windows.Handle, error) {
-	path := normalizeWindowsSerialPath(cfg.Port)
 	handle, err := windows.CreateFile(
-		windows.StringToUTF16Ptr(path),
+		windows.StringToUTF16Ptr(cfg.Port),
 		windows.GENERIC_READ|windows.GENERIC_WRITE,
 		0,
 		nil,
@@ -200,15 +198,4 @@ func configureWindowsSerialPort(handle windows.Handle, cfg serialConfig, timeout
 
 	procPurgeComm.Call(uintptr(handle), uintptr(purgeRxClear|purgeTxClear))
 	return nil
-}
-
-func normalizeWindowsSerialPath(port string) string {
-	trimmed := strings.ToUpper(strings.TrimSpace(port))
-	if strings.HasPrefix(trimmed, `\\.\`) {
-		return trimmed
-	}
-	if filepath.VolumeName(trimmed) != "" {
-		return trimmed
-	}
-	return `\\.\` + trimmed
 }

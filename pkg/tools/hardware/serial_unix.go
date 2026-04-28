@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -112,7 +111,7 @@ func serialWrite(cfg serialConfig, data []byte, timeout time.Duration) (int, err
 }
 
 func openAndConfigureSerialPort(cfg serialConfig) (int, error) {
-	fd, err := unix.Open(normalizeUnixSerialPath(cfg.Port), unix.O_RDWR|unix.O_NOCTTY|unix.O_NONBLOCK, 0)
+	fd, err := unix.Open(cfg.Port, unix.O_RDWR|unix.O_NOCTTY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return -1, err
 	}
@@ -252,12 +251,4 @@ func durationToPollTimeout(timeout time.Duration) int {
 		return 1
 	}
 	return ms
-}
-
-func normalizeUnixSerialPath(port string) string {
-	trimmed := strings.TrimSpace(port)
-	if strings.HasPrefix(trimmed, "/dev/") {
-		return trimmed
-	}
-	return "/dev/" + trimmed
 }

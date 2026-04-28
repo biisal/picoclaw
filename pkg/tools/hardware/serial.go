@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"regexp"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -16,6 +19,15 @@ const (
 	defaultSerialTimeoutMS = 1000
 	maxSerialPayloadBytes  = 4096
 	maxSerialReadBytes     = 4096
+)
+
+var (
+	unixSerialPortPattern    = regexp.MustCompile(`^(?:/dev/)?(?:ttyS\d+|ttyUSB\d+|ttyACM\d+|ttyAMA\d+|rfcomm\d+|tty\.[A-Za-z0-9._-]+|cu\.[A-Za-z0-9._-]+)$`)
+	windowsSerialPortPattern = regexp.MustCompile(`^(?:\\\\\.\\)?COM[1-9]\d*$`)
+	unixSerialBaudRates      = map[int]struct{}{
+		50: {}, 75: {}, 110: {}, 134: {}, 150: {}, 200: {}, 300: {}, 600: {}, 1200: {}, 1800: {},
+		2400: {}, 4800: {}, 9600: {}, 19200: {}, 38400: {}, 57600: {}, 115200: {}, 230400: {},
+	}
 )
 
 type SerialTool struct{}
@@ -60,7 +72,7 @@ func (t *SerialTool) Parameters() map[string]any {
 			},
 			"baud": map[string]any{
 				"type":        "integer",
-				"description": "Baud rate. Default: 115200.",
+				"description": "Baud rate. Default: 115200. Linux/macOS currently support standard termios rates up to 230400; Windows accepts configured rates up to 4000000.",
 			},
 			"data_bits": map[string]any{
 				"type":        "integer",
@@ -209,8 +221,13 @@ func parseSerialConfig(args map[string]any) (serialConfig, *ToolResult) {
 		return serialConfig{}, ErrorResult("port is required (for example /dev/ttyUSB0, /dev/cu.usbserial-0001, or COM3)")
 	}
 
+	normalizedPort, err := normalizeSerialPort(port)
+	if err != nil {
+		return serialConfig{}, ErrorResult(err.Error())
+	}
+
 	cfg := serialConfig{
-		Port:     port,
+		Port:     normalizedPort,
 		Baud:     defaultSerialBaud,
 		DataBits: defaultSerialDataBits,
 		Parity:   "none",
@@ -220,8 +237,8 @@ func parseSerialConfig(args map[string]any) (serialConfig, *ToolResult) {
 	if v, ok := args["baud"].(float64); ok {
 		cfg.Baud = int(v)
 	}
-	if cfg.Baud < 50 || cfg.Baud > 4000000 {
-		return serialConfig{}, ErrorResult("baud must be between 50 and 4000000")
+	if err := validateSerialBaud(cfg.Baud); err != nil {
+		return serialConfig{}, ErrorResult(err.Error())
 	}
 
 	if v, ok := args["data_bits"].(float64); ok {
@@ -288,6 +305,9 @@ func parseSerialWritePayload(args map[string]any) ([]byte, *ToolResult) {
 		if !ok {
 			return nil, ErrorResult(fmt.Sprintf("data[%d] is not a valid byte value", i))
 		}
+		if f != math.Trunc(f) {
+			return nil, ErrorResult(fmt.Sprintf("data[%d] is not an integer byte value", i))
+		}
 		b := int(f)
 		if b < 0 || b > 255 {
 			return nil, ErrorResult(fmt.Sprintf("data[%d] = %d is out of byte range (0-255)", i, b))
@@ -329,4 +349,57 @@ func serialPayloadSummary(data []byte) map[string]any {
 		summary["text"] = string(data)
 	}
 	return summary
+}
+
+func normalizeSerialPort(port string) (string, error) {
+	switch runtime.GOOS {
+	case "windows":
+		return normalizeWindowsSerialPath(port)
+	case "linux", "darwin":
+		return normalizeUnixSerialPath(port)
+	default:
+		if normalized, err := normalizeUnixSerialPath(port); err == nil {
+			return normalized, nil
+		}
+		return normalizeWindowsSerialPath(port)
+	}
+}
+
+func normalizeUnixSerialPath(port string) (string, error) {
+	trimmed := strings.TrimSpace(port)
+	if !unixSerialPortPattern.MatchString(trimmed) {
+		return "", fmt.Errorf(
+			"invalid serial port: expected a safe Unix device name such as /dev/ttyUSB0 or /dev/cu.usbserial-0001",
+		)
+	}
+	if strings.HasPrefix(trimmed, "/dev/") {
+		return trimmed, nil
+	}
+	return "/dev/" + trimmed, nil
+}
+
+func normalizeWindowsSerialPath(port string) (string, error) {
+	trimmed := strings.ToUpper(strings.TrimSpace(port))
+	if !windowsSerialPortPattern.MatchString(trimmed) {
+		return "", fmt.Errorf("invalid serial port: expected a COM port such as COM3")
+	}
+	if strings.HasPrefix(trimmed, `\\.\`) {
+		return trimmed, nil
+	}
+	return `\\.\` + trimmed, nil
+}
+
+func validateSerialBaud(baud int) error {
+	if baud < 50 || baud > 4000000 {
+		return fmt.Errorf("baud must be between 50 and 4000000")
+	}
+
+	switch runtime.GOOS {
+	case "linux", "darwin":
+		if _, ok := unixSerialBaudRates[baud]; !ok {
+			return fmt.Errorf("unsupported baud rate on this platform: %d (supported up to 230400)", baud)
+		}
+	}
+
+	return nil
 }

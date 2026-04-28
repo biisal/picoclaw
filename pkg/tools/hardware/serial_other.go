@@ -8,7 +8,7 @@ import (
 )
 
 func serialListPorts() ([]serialPortInfo, error) {
-	return nil, nil
+	return nil, fmt.Errorf("serial is not supported on this platform")
 }
 
 func serialRead(cfg serialConfig, length int, timeout time.Duration) ([]byte, error) {
